@@ -81,13 +81,22 @@ jobs:
 
           # 2) 등록 불가 필드 제거 + 이미지 교체
           jq --arg IMG "${{ env.IMAGE }}" '
-            del(.revision,.status,.requiresAttributes,.registeredBy,.registeredAt,.compatibilities,.taskDefinitionArn)
-            | .containerDefinitions[0].image=$IMG
+            del(
+            .taskDefinitionArn,
+            .revision,
+            .status,
+            .requiresAttributes,
+            .compatibilities,
+            .registeredAt,
+            .registeredBy,
+            .deregisteredAt
+            )
+            | .containerDefinitions[0].image = $IMG
           ' base-td.json > task-def.out.json
 
           # (디버그) 교체된 이미지 출력
-          jq -r '.containerDefinitions[0].image' task-def.out.json
-
+          echo "IMAGE in TD:" && jq -r '.containerDefinitions[0].image' task-def.out.json
+          echo "Top-level keys:" && jq -r 'keys[]' task-def.out.json
       - name: Register new task definition
         id: register
         run: |
