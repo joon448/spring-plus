@@ -61,17 +61,42 @@ jobs:
           docker push "${{ env.IMAGE }}"
           docker push "${{ secrets.ECR_REPO }}:latest"
 
-      # ecs-task-def.json: "aws ecs describe-task-definition" 출력(콘솔/CLI) 저장본
-      - name: Render task definition (replace image)
+      - name: Fetch current task definition ARN
+        id: td
         run: |
-          jq --arg IMG "${{ env.IMAGE }}" '.taskDefinition.containerDefinitions[0].image=$IMG | .taskDefinition' ecs-task-def.json > task-def.out.json
-          cat task-def.out.json | jq '.containerDefinitions[0].image'
+          TD_ARN=$(aws ecs describe-services \
+            --cluster myapp-cluster \
+            --services ecs-task-definition-service-0xnu67j7 \
+            --region ${{ secrets.AWS_REGION }} \
+            --query 'services[0].taskDefinition' --output text)
+          echo "TD_ARN=$TD_ARN" >> $GITHUB_OUTPUT
+
+      - name: Render new task definition from current (replace image)
+        run: |
+          # 1) 현재 태스크 정의 원본 가져오기
+          aws ecs describe-task-definition \
+            --task-definition "${{ steps.td.outputs.TD_ARN }}" \
+            --region ${{ secrets.AWS_REGION }} \
+            --query 'taskDefinition' > base-td.json
+
+          # 2) 등록 불가 필드 제거 + 이미지 교체
+          jq --arg IMG "${{ env.IMAGE }}" '
+            del(.revision,.status,.requiresAttributes,.registeredBy,.registeredAt,.compatibilities,.taskDefinitionArn)
+            | .containerDefinitions[0].image=$IMG
+          ' base-td.json > task-def.out.json
+
+          # (디버그) 교체된 이미지 출력
+          jq -r '.containerDefinitions[0].image' task-def.out.json
 
       - name: Register new task definition
         id: register
         run: |
-          TD_ARN=$(aws ecs register-task-definition --cli-input-json file://task-def.out.json --query 'taskDefinition.taskDefinitionArn' --output text)
+          TD_ARN=$(aws ecs register-task-definition \
+            --cli-input-json file://task-def.out.json \
+            --query 'taskDefinition.taskDefinitionArn' --output text \
+            --region ${{ secrets.AWS_REGION }})
           echo "TD_ARN=$TD_ARN" >> $GITHUB_OUTPUT
+
 
       - name: Update ECS service (rolling)
         run: |
