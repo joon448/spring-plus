@@ -1,41 +1,164 @@
-name: CI-CD to EC2 (systemd)
+name: Build & Deploy (ECS / EC2)
 
 on:
   push:
-    branches: [ main ]
+    branches: [ "main" ]
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "Where to deploy? (ecs | ec2 | both)"
+        required: false
+        default: "ecs"
+
+permissions:
+  id-token: write   # OIDC for AWS
+  contents: read
+
+env:
+  # ===== ECS 공통 =====
+  AWS_REGION: ap-northeast-2
+  ECS_CLUSTER: plus-ecs-cluster
+  ECS_SERVICE: plus-task-service-5ad7mssm
+  ECR_REPOSITORY: plus-app
+  TASK_DEFINITION_NAME: plus-task
+  CONTAINER_NAME: app
 
 jobs:
-  build-and-deploy:
+  build:
+    name: Build JAR
     runs-on: ubuntu-latest
+    outputs:
+      artifact_name: ${{ steps.meta.outputs.artifact_name }}
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-java@v4
         with:
-          distribution: 'temurin'
-          java-version: '17'
+          distribution: temurin
+          java-version: "17"
 
-      - name: Build jar
+      - name: Build JAR
         run: ./gradlew clean bootJar -x test
 
-      - name: Rename jar with commit sha + date
+      - name: Name artifact (sha + timestamp)
+        id: meta
         run: |
           FILE=$(ls build/libs/*.jar | head -n1)
           SHA=${GITHUB_SHA::8}
           TS=$(date -u +'%Y%m%d-%H%M%S')
           NEW="app-${TS}-${SHA}.jar"
           mv "$FILE" "build/libs/$NEW"
-          echo "ARTIFACT=$NEW" >> $GITHUB_ENV
+          echo "artifact_name=$NEW" >> $GITHUB_OUTPUT
+
+      - name: Upload JAR artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.meta.outputs.artifact_name }}
+          path: build/libs/${{ steps.meta.outputs.artifact_name }}
+
+  deploy-ecs:
+    name: Deploy to ECS
+    needs: build
+    runs-on: ubuntu-latest
+    # push일 때는 기본으로 실행, 수동 실행이면 target이 ec2가 아닐 때 실행
+    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.target != 'ec2')
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download JAR artifact (for Docker build context if needed)
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.build.outputs.artifact_name }}
+          path: build/libs
+
+      - name: Configure AWS (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-region: ${{ env.AWS_REGION }}
+          role-to-assume: arn:aws:iam::083880123810:role/GitHubActionsEcsDeployRole
+
+      - name: Login to Amazon ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build & Push Docker image
+        run: |
+          REG=${{ steps.ecr.outputs.registry }}
+          IMAGE_URI=$REG/${{ env.ECR_REPOSITORY }}:${{ github.sha }}
+          docker build -t $IMAGE_URI .
+          docker push $IMAGE_URI
+          echo "IMAGE_URI=$IMAGE_URI" >> $GITHUB_ENV
+
+      - name: Install jq
+        run: sudo apt-get update && sudo apt-get install -y jq
+
+      - name: Fetch current task definition
+        run: |
+          aws ecs describe-task-definition \
+            --task-definition ${{ env.TASK_DEFINITION_NAME }} \
+            --query taskDefinition > taskdef.json
+          cat taskdef.json
+
+      - name: Register new task definition with new image
+        run: |
+          NEW=$(jq --arg IMG "$IMAGE_URI" --arg NAME "${{ env.CONTAINER_NAME }}" '
+            .
+            | del(
+                .taskDefinitionArn,
+                .revision,
+                .status,
+                .requiresAttributes,
+                .compatibilities,
+                .registeredAt,
+                .registeredBy,
+                .deregisteredAt
+              )
+            | .containerDefinitions |= (map(
+                if .name == $NAME then .image = $IMG else . end
+              ))
+          ' taskdef.json)
+          echo "$NEW" > new-taskdef.json
+
+          ARN=$(aws ecs register-task-definition \
+            --cli-input-json file://new-taskdef.json \
+            --query taskDefinition.taskDefinitionArn \
+            --output text)
+          echo "TASK_DEF_ARN=$ARN" >> $GITHUB_ENV
+          echo "Registered: $ARN"
+
+      - name: Update service (rolling deploy)
+        run: |
+          aws ecs update-service \
+            --cluster ${{ env.ECS_CLUSTER }} \
+            --service ${{ env.ECS_SERVICE }} \
+            --task-definition "$TASK_DEF_ARN" \
+            --force-new-deployment
+
+  deploy-ec2:
+    name: Deploy to EC2 (systemd)
+    needs: build
+    runs-on: ubuntu-latest
+    # push일 때는 기본 비활성, 수동 실행에서 target이 ec2 또는 both일 때 실행
+    if: github.event_name == 'workflow_dispatch' && (inputs.target == 'ec2' || inputs.target == 'both')
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download JAR artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.build.outputs.artifact_name }}
+          path: build/libs
 
       - name: Detect runner public IP
         id: ip
         run: echo "MY_IP=$(curl -s https://checkip.amazonaws.com)/32" >> $GITHUB_OUTPUT
 
-      - uses: aws-actions/configure-aws-credentials@v4
+      - name: Configure AWS (Static Keys for EC2 SSH rule)
+        uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ secrets.AWS_REGION }}
+          aws-region: ${{ env.AWS_REGION }}
 
       - name: Open SSH for this runner
         run: |
@@ -49,7 +172,7 @@ jobs:
           host: ${{ secrets.EC2_HOST }}
           username: ${{ secrets.EC2_USER }}
           key: ${{ secrets.EC2_SSH_KEY }}
-          source: "build/libs/${{ env.ARTIFACT }}"
+          source: "build/libs/${{ needs.build.outputs.artifact_name }}"
           target: "/opt/plus/releases/"
           strip_components: 2
 
@@ -61,9 +184,9 @@ jobs:
           key: ${{ secrets.EC2_SSH_KEY }}
           script: |
             set -e
-            JAR="/opt/plus/releases/${{ env.ARTIFACT }}"
+            JAR="/opt/plus/releases/${{ needs.build.outputs.artifact_name }}"
             echo "Switch to $JAR"
-            ln -sfn "$JAR" /opt/plus/app.jar
+            sudo ln -sfn "$JAR" /opt/plus/app.jar
             sudo systemctl restart todo-management.service
             sudo systemctl status todo-management.service --no-pager --full || true
 
