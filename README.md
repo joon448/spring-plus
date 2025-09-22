@@ -6,6 +6,7 @@
     * `/auth/**`는 인증 없이 접근(permitAll), 나머지는 JWT 필요
     * 토큰은 응답 바디로 반환: `{"bearerToken":"Bearer ..."}`
     * Todo 생성 시 작성자가 자동으로 Manager 등록
+    * main branch push 시 ECR-ECS 자동 배포 (EC2 배포 수동 선택 가능)
 
 * 스택: Java 17+, Spring Boot, Spring Security (JWT), Spring Data JPA, Validation, JUnit 5 / Mockito / MockMvc
 
@@ -339,7 +340,8 @@
 
 ### 2.2 API Access
 
-* Public IP: `http://43.200.65.248:8080/`
+* Public (EC2): `http://43.200.65.248:8080/`
+* Public (ECR-ECS) `http://alb-plus-app-1048754692.ap-northeast-2.elb.amazonaws.com/`
 
 #### Health Check API
 
@@ -824,6 +826,9 @@ QueryDSL
 	#프로젝트 루트에서
 	gradle wrapper --gradle-version 8.7
   ```
+- 문제: Jar로 배포 시 실행 환경 수동으로 설정해야 하는 어려움 있음
+- 해결: ECR-ECS를 활용하여 Docker file로 배포
+
 
 #### 🟡 Level 13.
 
@@ -863,9 +868,18 @@ QueryDSL
     * table drop 후 재생성
 * Controller test 시 제대로 응답이 오지 않음
   * JwtAuthenticationFilter 대신 JwtUtil를 모킹하는 실수
-  * filter 단에서 200 및 빈 응답이 전달되었다
+  * filter 단에서 200 및 빈 응답이 전달됨
 * Auth Controller Test 시 401 오류가 발생함
   * @Import(SecurityConfig.class)로 해결
+* AWS EC2 (Jar) CI/CD 구축
+  * 정리 
+    
+    https://www.notion.so/Spring-Plus-AWS-EC2-2-CI-CD-273d4aba6bd480259e7dc84698926266?source=copy_link
+* AWS ECR-ECS (Docker) CI/CD 구축
+  * 정리
+
+    https://www.notion.so/Spring-Plus-AWS-ECR-ECS-CI-CD-276d4aba6bd480d8afcbd35cc89ce3d3?source=copy_link
+
 
 ---
 

@@ -75,7 +75,7 @@ jobs:
         uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-region: ${{ env.AWS_REGION }}
-          role-to-assume: arn:aws:iam::083880123810:role/GitHubActionsEcsDeployRole
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT }}:role/GitHubActionsEcsDeployRole
 
       - name: Login to Amazon ECR
         id: ecr
@@ -163,7 +163,7 @@ jobs:
       - name: Open SSH for this runner
         run: |
           aws ec2 authorize-security-group-ingress \
-            --group-id sg-0893adff359fd7994 \
+            --group-id ${{ secrets.EC2_SG }} \
             --ip-permissions "IpProtocol=tcp,FromPort=22,ToPort=22,IpRanges=[{CidrIp='${{ steps.ip.outputs.MY_IP }}',Description='gha-temporary'}]"
 
       - name: Upload jar to EC2
@@ -194,5 +194,5 @@ jobs:
         if: always()
         run: |
           aws ec2 revoke-security-group-ingress \
-            --group-id sg-0893adff359fd7994 \
+            --group-id ${{ secrets.EC2_SG }} \
             --ip-permissions "IpProtocol=tcp,FromPort=22,ToPort=22,IpRanges=[{CidrIp='${{ steps.ip.outputs.MY_IP }}'}]"
